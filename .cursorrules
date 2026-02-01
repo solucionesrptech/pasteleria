@@ -1,0 +1,417 @@
+# Pastelería Bella - Reglas del Proyecto
+
+## Stack Tecnológico (NO CAMBIAR)
+
+- **Next.js 14+** con App Router (`/app`)
+- **PostgreSQL** + **Prisma** (solo acceso desde server, NUNCA desde cliente)
+- **Tailwind CSS** para estilos
+- **Zod** para validación de inputs
+- **TypeScript** estricto
+- **bcryptjs** para passwords
+
+## Restricciones Arquitectónicas
+
+1. **NO microservicios** - Todo en un solo repo Next.js
+2. **NO PostgREST directo** - Acceso a DB SOLO vía Prisma en server (API routes/route handlers)
+3. **NO Supabase Auth** - Autenticación propia con bcrypt + cookies
+4. **NO estilos inline** - Usar solo Tailwind CSS
+5. **NO usar !important** - Resolver conflictos con especificidad CSS correcta
+6. **Implementar por incrementos pequeños** - Cero refactors grandes
+
+## Estructura de Carpetas
+
+```
+app/
+├── (cliente)/          # Rutas cliente
+├── (admin)/            # Rutas admin (las URLs son /admin/..., NO /admin/admin/...)
+│   └── admin/          # Carpeta interna para agrupar, pero URLs directas /admin/*
+└── api/                # API Routes
+
+components/
+├── ui/                 # Componentes reutilizables (Button, Card, Input, Badge, Table)
+└── shared/             # Componentes compartidos
+
+lib/
+├── prisma.ts           # Cliente Prisma singleton
+├── auth.ts             # Utilidades autenticación
+├── rbac.ts             # Helpers RBAC
+├── validations.ts      # Schemas Zod
+├── inventory.ts        # Lógica inventario
+└── utils.ts            # Utilidades generales
+```
+
+### Regla de Rutas Admin
+- **URLs deben ser `/admin/...`** (ej: `/admin/pedidos`, `/admin/productos`)
+- **Carpeta interna**: `app/(admin)/admin/...` para agrupar rutas
+- **NO duplicar**: Evitar rutas como `/admin/admin/...` (redundancia)
+
+## Reglas de Negocio (Chile V1)
+
+### Precios
+- **IVA incluido** - Todos los precios son finales (priceCLP ya incluye IVA)
+- **CLP como INT** - Todos los precios en pesos chilenos son enteros (sin decimales)
+  - `priceCLP Int` (NO Decimal)
+  - `totalCLP Int`
+  - `unitPriceCLP Int`
+  - `lineTotalCLP Int`
+  - `amountCLP Int`
+- Formato CLP: usar separadores de miles (ej: $15.990)
+- **Razón**: Evita problemas de formateo, sumas y UI con decimales innecesarios
+
+### Horario de Atención
+- **09:00 a 17:00** - Validar checkout dentro de este horario (server-side)
+- Validación en `lib/utils.ts` con función `isValidBusinessHours()`
+
+### Delivery y Retiro
+- **Delivery propio** y **Retiro en tienda** (fulfillmentType: DELIVERY | PICKUP)
+- **Zona delivery inicial**: Solo "Santiago Centro"
+- Validar zona en server si fulfillmentType = DELIVERY
+- **Sin cupos por ventana horaria** (V1)
+
+### Roles V1 (Obligatorios)
+- `SUPER_ADMIN` - Acceso total
+- `JEFE_VENTAS` - Reportes
+- `PRODUCCION` - Inventario/stock, CRUD productos
+- `RECEPCION` - Gestiona pedidos y prepara despacho
+- `DELIVERY` - Marca estados de entrega
+
+### Estados de Pedido V1
+- `CREADO` - Pedido creado, pendiente de pago
+- `PAGADO` - Pago confirmado
+- `EN_PREPARACION` - En preparación
+- `LISTO` - Listo para entrega/retiro
+- `EN_RUTA` - Solo para delivery, en camino
+- `ENTREGADO` - Delivery completado
+- `RETIRADO` - Retiro en tienda completado
+- `CANCELADO` - Pedido cancelado
+
+### Transiciones de Estado (Validar en server)
+- `PAGADO` → `EN_PREPARACION` (solo RECEPCION)
+- `EN_PREPARACION` → `LISTO` (solo RECEPCION)
+- `LISTO` → `EN_RUTA` (solo si fulfillmentType = DELIVERY, solo RECEPCION)
+- `LISTO` → `RETIRADO` (solo si fulfillmentType = PICKUP, solo RECEPCION)
+- `EN_RUTA` → `ENTREGADO` (solo RECEPCION o DELIVERY)
+- Cualquier estado → `CANCELADO` (solo SUPER_ADMIN)
+
+## Seguridad (Obligatorio)
+
+1. **Validación Zod** en TODOS los endpoints POST/PATCH
+2. **RBAC** en middleware y utilidades server (`lib/rbac.ts`)
+3. **Variables de entorno** para secretos (DATABASE_URL, SESSION_SECRET)
+4. **Passwords hasheados** con bcrypt (10 rounds mínimo)
+5. **Cookies httpOnly** para sesiones
+6. **Transacciones Prisma** para operaciones críticas (pago + inventario)
+
+## Componentes UI
+
+### Reglas de Estilos
+- **NO usar `!important`** - Resolver con especificidad CSS
+- **NO estilos inline** - Todo con Tailwind
+- **Componentes reutilizables** - Button, Card, Input, Badge, Table
+- **Props tipadas** con TypeScript
+- **Accesibilidad básica** - aria-labels donde corresponda
+
+### Variantes de Componentes
+- **Button**: primary, secondary, outline, ghost
+- **Badge**: colores por estado de pedido
+- **Card**: contenedor reutilizable
+- **Input**: con label y mensaje de error
+- **Table**: tabla reutilizable con paginación opcional
+
+## Base de Datos (Prisma)
+
+### Modelos Obligatorios
+- `User` - email, passwordHash, role
+- `Product` - name, description, priceCLP (Int), imageUrl, active, stock
+- `Order` - customerName, customerEmail, customerPhone, fulfillmentType, deliveryAddress, zone, totalCLP (Int), status, publicToken (String @unique)
+- `OrderItem` - orderId, productId, quantity, unitPriceCLP (Int), lineTotalCLP (Int)
+- `Payment` - orderId, provider (MOCK), status (PAID|FAILED), amountCLP (Int)
+- `InventoryMovement` - productId, type (IN|OUT|ADJUST), quantity, reason, userId
+- `DeliveryAssignment` - orderId, deliveryUserId, status
+
+### Tracking Público de Pedidos
+- `Order.publicToken` - Token único generado al crear pedido (String @unique)
+- Endpoint público: `GET /api/orders/[id]?token=[publicToken]`
+- Validar que el token coincida con el pedido antes de mostrar información
+- Usar para tracking sin autenticación (cliente ve su pedido con id + token)
+
+### Reglas Prisma
+- **Cliente singleton** - Usar `lib/prisma.ts` (patrón recomendado)
+- **Solo acceso desde server** - NUNCA importar Prisma en componentes cliente
+- **Transacciones** para operaciones críticas (pago + inventario)
+
+## Inventario
+
+### Descuento Automático
+- Al pasar Order a `PAGADO`, descontar stock automáticamente
+- Crear `InventoryMovement` (type: OUT, reason: "Venta pedido #X")
+- Validar stock suficiente antes de descontar (rollback si falla)
+
+### Ajuste Manual
+- Solo rol `PRODUCCION` puede ajustar stock
+- Crear `InventoryMovement` (type: ADJUST) con razón
+
+## API Routes
+
+### Estructura
+- Todas las rutas en `app/api/`
+- Usar route handlers (Next.js 13+)
+- Validación Zod en body/query params
+- RBAC en endpoints que lo requieran
+
+### Endpoints Principales
+- `POST /api/auth/login` - Login
+- `POST /api/auth/logout` - Logout
+- `GET /api/products` - Listar productos activos
+- `GET /api/products/[id]` - Producto por ID
+- `POST /api/orders` - Crear pedido (genera publicToken)
+- `GET /api/orders` - Listar pedidos (admin, requiere auth)
+- `GET /api/orders/[id]?token=[publicToken]` - Pedido por ID (público, requiere token)
+- `PATCH /api/orders/[id]` - Actualizar estado (admin, requiere auth)
+- `POST /api/payments` - Procesar pago mock
+- `POST /api/inventory/adjust` - Ajustar stock
+- `GET /api/inventory/movements` - Historial movimientos
+- `GET /api/reports/sales` - Reporte ventas
+
+## Testing y Validación
+
+### Por Commit
+- Cada commit debe dejar el sistema **runnable**
+- Probar flujo completo después de cada commit
+- Verificar que no hay errores de TypeScript
+- Verificar que estilos Tailwind funcionan
+
+### Validaciones Comunes
+- TypeScript compila sin errores
+- `npm run dev` inicia correctamente
+- Prisma migrations ejecutadas
+- Seed ejecutado (datos iniciales)
+
+## Buenas Prácticas
+
+### Código
+- **TypeScript estricto** - Habilitar strict mode
+- **Nombres descriptivos** - Variables y funciones claras
+- **Comentarios** - Solo cuando sea necesario explicar lógica compleja
+- **DRY** - No repetir código, usar funciones/componentes reutilizables
+
+### Performance
+- **Prisma singleton** - Un solo cliente por instancia
+- **Paginación** en listados grandes (opcional V1)
+- **Índices DB** en campos frecuentes (Order.status, Product.active)
+
+### UX/UI
+- **Feedback visual** - Loading states, mensajes de error
+- **Responsive design** - Mobile-first
+- **Accesibilidad** - aria-labels, contraste adecuado
+
+## Commits Incrementales
+
+Seguir estructura de 5 commits:
+1. Bootstrap + Prisma + Home con productos desde DB
+2. Auth real + RBAC + /admin protegido
+3. Catálogo + Carrito
+4. Checkout + Pago MOCK + Inventario
+5. Backoffice completo
+
+Cada commit debe ser funcional y testeable.
+
+## Variables de Entorno
+
+### Requeridas
+- `DATABASE_URL` - URL de conexión PostgreSQL
+- `SESSION_SECRET` - Secreto para cookies de sesión
+
+### Opcionales
+- `NODE_ENV` - development | production
+
+## Notas Importantes
+
+- **Chile V1** - Reglas específicas para mercado chileno (IVA incluido, horario, zona)
+- **Vertical slice primero** - Flujo completo funcional antes de features adicionales
+- **Sin refactors grandes** - Implementar por incrementos pequeños
+- **Consistencia visual** - Usar componentes UI reutilizables
+
+## UI/UX Design System V1 - Pastelería Bella
+
+### Identidad Visual
+
+**Filosofía de Diseño:**
+- **Estilo**: Moderno, limpio, ligeramente futurista, pero cálido y artesanal premium
+- **Sensación**: Artesanal premium + tecnología limpia
+- **Principio**: Consistencia > creatividad - Reutilizar componentes y patrones
+- **Enfoque**: No es fintech, es pastelería - Cálido y amigable
+
+### Paleta de Colores (Basada en Logo)
+
+**Colores Principales:**
+- **Teal Principal**: `teal-600` (`#0d9488`) - Color principal del logo, usar para elementos destacados
+- **Teal Hover/Active**: `teal-700` / `teal-800` - Estados interactivos
+- **Teal Claro**: `teal-50` (`#f0fdfa`) - Fondos suaves, secciones alternas
+- **Teal Oscuro**: `teal-800` (`#115e59`) - Headers, elementos destacados
+
+**Neutros Cálidos:**
+- **Beige/Stone Claro**: `stone-100` (`#f5f5f4`) - Fondos cálidos
+- **Beige/Stone Medio**: `stone-600` (`#57534e`) - Texto secundario
+- **Blanco**: `white` - Cards, contraste
+
+**Colores Funcionales:**
+- **Éxito**: `green-600` (`#16a34a`)
+- **Advertencia**: `amber-500` (`#f59e0b`)
+- **Error**: `red-600` (`#dc2626`)
+- **Info**: `blue-600` (`#2563eb`)
+
+### Tipografía
+
+**Fuentes Implementadas:**
+- **Dancing Script**: Fuente decorativa principal (`font-decorative`) - Google Fonts
+  - Peso: 400 (normal)
+  - Uso: Títulos decorativos, hero titles, títulos de cards
+- **Lora**: Fuente serif elegante (`font-lora`) - Google Fonts
+  - Pesos: 400, 500, 600, 700
+  - Uso: Slogan del hero, textos destacados
+- **Sans-serif por defecto**: Arial, Helvetica (sistema)
+
+**Tamaños de Texto:**
+- **H1 Hero**: `font-decorative text-6xl lg:text-7xl xl:text-8xl font-normal`
+- **H1 Principal**: `font-bold text-3xl lg:text-4xl`
+- **H2 Sección**: `font-decorative text-4xl lg:text-5xl font-normal`
+- **H3 Card Título**: `font-decorative text-3xl lg:text-4xl font-normal`
+- **Slogan Hero**: `font-lora text-2xl lg:text-3xl xl:text-4xl font-semibold`
+- **Texto Cuerpo**: `text-base` o `text-sm`
+- **Texto Secundario**: `text-stone-600`
+
+**Reglas de Uso de Fuente Decorativa:**
+- **✅ Se usa en:**
+  - Títulos de secciones: "¿Qué estás celebrando?", "Algunos de nuestros antojos…"
+  - Hero titles: "Pastelería Bella"
+  - Títulos de cards de celebración
+  - Secciones editoriales / emocionales
+- **❌ NO se usa en:**
+  - Botones
+  - Formularios
+  - Textos largos
+  - Subtítulos de cards (usan sans-serif)
+  - Precios
+  - Admin / backoffice
+
+### Layout y Espaciado
+
+**Container:**
+- **Máximo ancho**: `max-w-7xl mx-auto`
+- **Padding horizontal**: `px-4 sm:px-6 lg:px-8`
+- **Padding vertical secciones**: `py-8` (estándar), `py-16` (grande)
+- **Separaciones**: `mb-12` o `mb-16` entre secciones
+
+**Grid Productos:**
+- `grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6`
+
+### Componentes Base (Reutilizables)
+
+**Button:**
+- **Primary**: `bg-teal-600 hover:bg-teal-700 text-white`
+- **Secondary**: `bg-stone-600 hover:bg-stone-700 text-white`
+- **Outline**: `border border-teal-600 text-teal-700 hover:bg-teal-50`
+- **Ghost**: `hover:bg-stone-100 text-stone-700`
+- **Focus**: `focus:outline-none focus:ring-2 focus:ring-teal-500 focus:ring-offset-2`
+- **Tamaños**: `px-6 py-3` (md), `px-4 py-2` (sm), `px-8 py-4` (lg)
+
+**Botones Hero (Pill Shape):**
+- **Estilo**: `rounded-full` (pill shape)
+- **Botón con fondo de imagen**: 
+  - `bg-[url('/images/background/fondoCard.png')] bg-cover bg-center bg-no-repeat`
+  - `text-stone-800 text-lg font-semibold px-10 py-5`
+  - `shadow-md hover:shadow-lg transition-all duration-200`
+- **Botón verde sólido**:
+  - `bg-teal-600 hover:bg-teal-700 text-white`
+  - `text-lg font-semibold px-10 py-5`
+  - `shadow-md hover:shadow-lg transition-all duration-200`
+
+**Card:**
+- `bg-white rounded-lg shadow-md p-6 hover:shadow-lg transition-shadow duration-200`
+- Flex column para contenido vertical
+- Hover opcional (activar según contexto)
+
+**CelebrationCard (Cards de Celebración):**
+- Estilo específico para sección "¿Qué estás celebrando?" y "Algunos de nuestros antojos"
+- Fondo de sección: `bg-[url('/images/background/fondo.png')] bg-cover bg-center bg-no-repeat`
+- Grid responsive: `grid-cols-2 md:grid-cols-3 gap-6`
+- Estructura card:
+  - `bg-white rounded-2xl shadow-md overflow-hidden`
+  - Imagen arriba: `aspect-[4/5]` (ratio vertical 4:5)
+  - Franja inferior: `bg-[url('/images/background/fondoCard.png')] bg-cover bg-center bg-no-repeat px-4 py-6 text-center`
+  - Título: `font-decorative text-3xl lg:text-4xl font-normal text-stone-800 mb-2`
+  - Subtítulo: `text-sm font-normal text-stone-600` (sans-serif, NO decorativa)
+- Hover: `transition-shadow duration-200 hover:shadow-lg`
+- Ubicación: `components/shared/CelebrationCard.tsx`
+- NO usar estilo teal por defecto - usar beige/stone para esta sección específica
+
+**cardWhatsapp (Cards con Badge de WhatsApp):**
+- Reutiliza el mismo estilo de CelebrationCard (papel + franja beige)
+- Componente: `components/shared/CelebrationCard.tsx`
+- Props: `showWhatsappBadge?: boolean`, `whatsappUrl?: string`
+- Badge de WhatsApp:
+  - Posición: `absolute top-3 right-3` sobre la imagen
+  - Estilo: `bg-white/90 backdrop-blur-sm border border-stone-200 rounded-full shadow-sm`
+  - Tamaño: `px-3 py-1.5 text-xs font-medium`
+  - Contenido: ícono WhatsApp SVG inline + texto "Pedido x WhatsApp"
+  - Color ícono: `text-green-600`
+  - Hover: `hover:bg-white hover:shadow-md transition-all duration-200`
+- Comportamiento:
+  - Si `whatsappUrl` está definido: renderiza `<a>` con link a WhatsApp
+  - Si no hay URL: renderiza `<button>` sin acción (para futura implementación)
+- Mantiene intacto: rounded-2xl, sombra suave, imagen aspect 4:5, franja beige, hover leve
+- Uso: `<CelebrationCard showWhatsappBadge whatsappUrl="https://wa.me/..." />`
+
+**Badge:**
+- Pequeño, semibold, colores por contexto/estado
+- `px-3 py-1 rounded-full text-xs font-semibold`
+- Variantes: default (beige), success (green), warning (amber), error (red), info (blue), teal
+
+**Input:**
+- `w-full px-3 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-teal-500`
+- Borde: `border-gray-300`, error: `border-red-500`
+- Label arriba, error abajo
+
+### Interacciones y Animaciones
+
+**Microinteracciones:**
+- `transition-colors duration-200` - Cambios de color
+- `transition-shadow duration-200` - Cambios de sombra
+- **NO animaciones complejas** - Solo transiciones CSS básicas
+- **NO sobrecargar** - Máximo 2-3 transiciones por elemento
+
+### Secciones de Landing Page
+
+**Estructura Estándar:**
+1. **Header**: Fondo blanco, logo + navegación, sticky opcional
+2. **Hero**: 
+   - Fondo: `bg-[url('/images/background/hero-pasteleria.png')] bg-cover bg-center bg-no-repeat`
+   - Overlay: `bg-black/40` para contraste
+   - Padding: `py-24 lg:py-32 xl:py-40`
+   - Estructura:
+     - Título: "Pastelería Bella" - `font-decorative text-6xl lg:text-7xl xl:text-8xl font-normal text-white`
+     - Slogan: "Tortas personalizadas..." - `font-lora text-2xl lg:text-3xl xl:text-4xl font-semibold text-white`
+     - Descripción: `text-lg lg:text-xl xl:text-2xl text-white`
+     - Botones: Pill shape con estilos específicos (ver Botones Hero)
+3. **Productos**: Grid de cards, fondo blanco o `teal-50` alternado
+4. **Celebraciones**: Sección "¿Qué estás celebrando?" con fondo `fondo.png`
+5. **Antojos**: Sección "Algunos de nuestros antojos" con fondo `fondo.png` y badges WhatsApp
+6. **Valores**: Sección con iconos/texto, fondo alterno
+7. **Footer**: Fondo `teal-800`, texto blanco, iconos sociales (WhatsApp, Instagram)
+
+### Restricciones Globales de Diseño
+
+- **Máximo 3-4 colores dominantes** por pantalla (teal + stone + blanco)
+- **Sin sombras excesivas** - Solo `shadow-sm`, `shadow-md`, `shadow-lg`
+- **Sin bordes gruesos** - Máximo `border-2`
+- **Mobile-first siempre** - Diseño responsive desde móvil
+- **Claridad visual** - Jerarquía clara, contraste adecuado
+- **Espaciado generoso** - Respiración visual, no saturación
+
+### Principios de Diseño
+
+- **Consistencia primero** - Mismo estilo en todas las pantallas
+- **Reutilización** - Usar componentes existentes antes de crear nuevos
+- **Accesibilidad** - aria-labels, contraste adecuado, focus visible
+- **Performance** - Código limpio, sin estilos inline, sin `!important`
